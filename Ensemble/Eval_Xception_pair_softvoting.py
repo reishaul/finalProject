@@ -1,38 +1,38 @@
-from sklearn.metrics import classification_report
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
+import os
+from PIL import Image
+import pandas as pd
+import numpy as np
+import copy
+import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.utils.data as data
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-from Common_Function_ import *
 import torch.multiprocessing
-from PIL import Image
-from models import xception_origin
-import copy
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 import sklearn.metrics as metrics
-import matplotlib.pyplot as plt
 
+# Assumption: These files exist in your folder
+from Common_Function_ import *
+from models import xception_origin
+
+# --- Hardware Settings ---
 torch.multiprocessing.set_sharing_strategy('file_system')
-GPU = '0,1,2'
+GPU = '0'  # Fixed for single GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = GPU
 device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
-calculate = False
+
 EPOCHS = 50
 BATCH_SIZE = 64
 VALID_RATIO = 0.3
 N_IMAGES = 100
-START_LR = 1e-5
-END_LR = 10
-NUM_ITER = 100
-PATIENCE_EARLYSTOP=10
-
 pretrained_size = 224
-pretrained_means = [0.4489, 0.3352, 0.3106]#[0.485, 0.456, 0.406]
-pretrained_stds= [0.2380, 0.1965, 0.1962]#[0.229, 0.224, 0.225]
+pretrained_means = [0.4489, 0.3352, 0.3106]
+pretrained_stds = [0.2380, 0.1965, 0.1962]
 
+# --- Dataset Class ---
 class CustumDataset(Dataset):
     def __init__(self, data, target, data_2=None, target_2=None, transform=None):
         self.data = data
@@ -43,9 +43,9 @@ class CustumDataset(Dataset):
 
         if self.data_video:
             self.len_data2 = len(self.data_video)
-        print(self.len_data2)
-        print(len(self.data_video))
-        print(len(self.data))
+        
+        print(f"Data Video Len: {self.len_data2}")
+        print(f"Target Len: {len(self.target)}")
 
         assert (self.len_data2 == len(self.target) == len(self.target_video) == len(self.data) == len(self.data_video))
 
@@ -55,76 +55,31 @@ class CustumDataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
+        
+        # Audio Spectrogram
         path = self.data[idx]
-        img = Image.open(path)
-        img = img.convert('RGB')
+        img = Image.open(path).convert('RGB')
         if self.transform:
             img = self.transform(img)
 
+        # Video Frame
         if self.data_video:
-            path_video = self.data[idx]
-            img_video = Image.open(path_video)
-            img_video = img_video.convert('RGB')
+            path_video = self.data_video[idx]
+            img_video = Image.open(path_video).convert('RGB')
             if self.transform:
                 img_video = self.transform(img_video)
             return img, self.target[idx], img_video, self.target_video[idx]
+            
         return img, self.target[idx]
 
-train_transforms = transforms.Compose([
-                           transforms.Resize((pretrained_size,pretrained_size)),
-                           transforms.RandomHorizontalFlip(0.5),
-                           # transforms.RandomCrop(pretrained_size, padding = 10),
-                           transforms.ToTensor(),
-                           transforms.Normalize(mean = pretrained_means,
-                                                std = pretrained_stds)
-                       ])
-
-test_transforms = transforms.Compose([
-                           transforms.Resize((pretrained_size,pretrained_size)),
-                           transforms.ToTensor(),
-                           transforms.Normalize(mean = pretrained_means,
-                                                std = pretrained_stds)
-                       ])
-
-####
 def getnum_of_files(path):
     _dict = {}
-    for (a,b,c) in os.walk(path):
-        if not b:
-            _dict[a.split('/')[-1]] = len(c)
+    for (root, dirs, files) in os.walk(path):
+        if not dirs:
+            _dict[root.split(os.path.sep)[-1]] = len(files)
     return _dict
 
-
-####
-test_dir =  ["/media/data1/mhkim/FAKEVV_hasam/test/SPECTOGRAMS/real_A_fake_others",
-             "/media/data1/mhkim/FAKEVV_hasam/test/FRAMES/real_A_fake_others"]
-list_test = [datasets.ImageFolder(root = test_dir[0],transform = None),
-            datasets.ImageFolder(root = test_dir[1],transform = None)]
-print(list_test[0].targets)
-
-#test
-list_glob_testpath = [list_test[1].samples[i][0] for i in range(len(list_test[1].samples))]
-list_targets_testpath = [list_test[1].targets[i] for i in range(len(list_test[1].targets))]
-
-list_num_test = getnum_of_files(test_dir[1])
-list_glob_testpath_video=[]; list_targets_testpath_video=[]
-for i in range(len(list_test[0].samples)):
-    _str = list_test[0].samples[i][0].split('/')[-2]
-    num_repeat = int(list_num_test[_str])
-    list_glob_testpath_video += [list_test[0].samples[i][0]] * num_repeat
-    list_targets_testpath_video += [list_test[0].targets[i]] * num_repeat
-    i = i + num_repeat
-
-assert(list_targets_testpath_video == list_targets_testpath)
-test_data = CustumDataset(list_glob_testpath, list_targets_testpath, list_glob_testpath_video, list_targets_testpath_video, test_transforms)
-print(f'Number of testing examples: {len(test_data)}')
-
-
-
-pretrained_size = 224
-pretrained_means = [0.4489, 0.3352, 0.3106]#[0.485, 0.456, 0.406]
-pretrained_stds= [0.2380, 0.1965, 0.1962]#[0.229, 0.224, 0.225]
-
+# --- Ensemble Class (Xception) ---
 class Ensemble(nn.Module):
     def __init__(self, models=[], device='cuda', training=True):
         super().__init__()
@@ -139,91 +94,130 @@ class Ensemble(nn.Module):
         feat1 = self.model1(video)
         feat2 = self.model2(frame)
         out = feat1 + feat2
-        # print(out)
-        out = out/ 2
+        out = out / 2
         return out
-    def get_models(self):
-        return [self.model1, self.model2]
-models = [xception_origin.xception(num_classes=2, pretrained=''), xception_origin.xception(num_classes=2, pretrained='')]
-MODELS_NAME = 'Xception'
-# list_checkpoint = [torch.load('/home/mhkim/DFVV/PRETRAINING/Xception_realA_fakeB.pt',map_location='cpu')['state_dict'],
-#                    torch.load('/home/mhkim/DFVV/PRETRAINING/Xception_realA_fakeC.pt')['state_dict']]
 
-list_checkpoint = [torch.load(f'/home/mhkim/DFVV/PRETRAINING/{MODELS_NAME}_realA_fakeB.pt',map_location='cuda')['state_dict'],
-                   torch.load(f'/home/mhkim/DFVV/PRETRAINING/{MODELS_NAME}_realA_fakeC.pt',map_location='cuda')['state_dict']]
+# --- Dynamic Path Fixing ---
+current_script_path = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_script_path)
+
+test_dir = [
+    os.path.join(project_root, "dataset", "test", "SPECTOGRAMS", "real_A_fake_others"),
+    os.path.join(project_root, "dataset", "test", "FRAMES", "real_A_fake_others")
+]
+
+checkpoint_dir = os.path.join(project_root, "models")
+MODELS_NAME = 'Xception'
+
+test_transforms = transforms.Compose([
+    transforms.Resize((pretrained_size, pretrained_size)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=pretrained_means, std=pretrained_stds)
+])
+
+# Loading Data
+print(f"Loading data from: {test_dir}")
+list_test = [datasets.ImageFolder(root=test_dir[0], transform=None),
+             datasets.ImageFolder(root=test_dir[1], transform=None)]
+
+# Preparing File Lists
+list_glob_testpath = [list_test[1].samples[i][0] for i in range(len(list_test[1].samples))]
+list_targets_testpath = [list_test[1].targets[i] for i in range(len(list_test[1].targets))]
+
+list_num_test = getnum_of_files(test_dir[1])
+list_glob_testpath_video = []
+list_targets_testpath_video = []
+
+for i in range(len(list_test[0].samples)):
+    folder_name = list_test[0].samples[i][0].split(os.path.sep)[-2]
+    num_repeat = int(list_num_test.get(folder_name, 0))
+    list_glob_testpath_video += [list_test[0].samples[i][0]] * num_repeat
+    list_targets_testpath_video += [list_test[0].targets[i]] * num_repeat
+
+assert(list_targets_testpath_video == list_targets_testpath)
+test_data = CustumDataset(list_glob_testpath, list_targets_testpath, list_glob_testpath_video, list_targets_testpath_video, test_transforms)
+print(f'Number of testing examples: {len(test_data)}')
+
+
+# --- Loading Xception Models ---
+print("Loading Xception models...")
+models = [
+    xception_origin.xception(num_classes=2, pretrained=''),
+    xception_origin.xception(num_classes=2, pretrained='')
+]
+
+path_model_1 = os.path.join(checkpoint_dir, f'{MODELS_NAME}_realA_fakeB.pt')
+path_model_2 = os.path.join(checkpoint_dir, f'{MODELS_NAME}_realA_fakeC.pt')
+
+print(f"Loading checkpoints from {checkpoint_dir}...")
+list_checkpoint = [
+    torch.load(path_model_1, map_location=device)['state_dict'],
+    torch.load(path_model_2, map_location=device)['state_dict']
+]
+
 models[0].load_state_dict(list_checkpoint[0])
 models[1].load_state_dict(list_checkpoint[1])
 
-ecls = Ensemble(models,device)
-ecls = nn.DataParallel(ecls)  # 4개의 GPU를 이용할 경우
+# Create Ensemble
+ecls = Ensemble(models, device)
+if torch.cuda.device_count() > 1:
+    ecls = nn.DataParallel(ecls)
 ecls = ecls.to(device)
-label_encoder = LabelEncoder()
-enc = OneHotEncoder(sparse=False)
-
-y_true = np.zeros((0, 2), dtype=np.int8)
-y_pred = np.zeros((0, 2), dtype=np.int8)
 ecls.eval()
-test_iterator = data.DataLoader(test_data,
-                                shuffle = True,
-                                batch_size = BATCH_SIZE)
-y_pred_auc, y_true_auc = [],[]
-for i, data in enumerate(test_iterator):
+
+# --- Evaluation Loop ---
+test_iterator = DataLoader(test_data, shuffle=True, batch_size=BATCH_SIZE)
+
+y_true = []
+y_pred_probs = []
+y_pred_labels = []
+
+print("Starting Soft Voting Evaluation...")
+for i, batch_data in enumerate(test_iterator):
     with torch.no_grad():
-        in_1 = data[0].to(device)
-        in_2 = data[2].to(device)
+        in_1 = batch_data[0].to(device)
+        in_2 = batch_data[2].to(device)
+        targets = batch_data[1].to(device)
 
-        _y_pred = ecls(in_1, in_2).cpu().detach()
-        _pred = copy.deepcopy(_y_pred).detach().cpu()  # .tolist()
-        _true = copy.deepcopy(data[1]).detach().cpu().float().tolist()
-        [y_pred_auc.append(_a) for _a in _pred[:, 1]]
-        [y_true_auc.append(_a) for _a in _true]
+        # Forward Pass
+        outputs = ecls(in_1, in_2)
+        
+        # Softmax for probabilities
+        probs = torch.nn.functional.softmax(outputs, dim=1)
+        
+        # Store results
+        y_true.extend(targets.cpu().numpy())
+        y_pred_probs.extend(probs[:, 1].cpu().numpy())
+        y_pred_labels.extend(outputs.argmax(dim=1).cpu().numpy())
 
-        integer_encoded = label_encoder.fit_transform(data[1].detach().cpu())
-        integer_encoded_2 = label_encoder.fit_transform(data[3].detach().cpu())
-        integer_encoded = integer_encoded.reshape(len(integer_encoded), 1)
-        integer_encoded_2 = integer_encoded_2.reshape(len(integer_encoded_2), 1)
+# Convert to Numpy
+y_true = np.array(y_true)
+y_pred_labels = np.array(y_pred_labels)
+y_pred_probs = np.array(y_pred_probs)
 
-        onehot_encoded = enc.fit_transform(integer_encoded)
-        onehot_encoded_2 = enc.fit_transform(integer_encoded_2)
-        onehot_encoded = onehot_encoded.astype(np.int8)
-        onehot_encoded_2 = onehot_encoded_2.astype(np.int8)
+# --- Print Results ---
+print("-" * 30)
+print(f'Final Accuracy: {accuracy_score(y_true, y_pred_labels) * 100:.2f}%')
+print("-" * 30)
 
-        """spectograms(video) and frames are must be matched. So, the number 2 is only True label."""
-        _y_true = torch.tensor(onehot_encoded + onehot_encoded_2)
-        _y_true_argmax = _y_true.argmax(1)
-        _y_true = np.array(torch.zeros(_y_true.shape).scatter(1, _y_true_argmax.unsqueeze(1), 1), dtype=np.int8)
-        y_true = np.concatenate((y_true, _y_true))
+print(classification_report(y_true, y_pred_labels, digits=5, zero_division='warn'))
 
-        a = _y_pred.argmax(1)
-        _y_pred = np.array(torch.zeros(_y_pred.shape).scatter(1, a.unsqueeze(1), 1), dtype=np.int8)
-        y_pred = np.concatenate((y_pred, _y_pred))
-
-result = classification_report(y_true, y_pred, labels=None, target_names=None, sample_weight=None, digits=5,
-                               output_dict=False, zero_division='warn')
-print(result)
-print(f'ACC is {accuracy_score(y_true, y_pred)}')
-y_true_auc, y_pred_auc = np.array(y_true_auc), np.array(y_pred_auc)
-print(y_true_auc.shape, y_pred_auc.shape)
-fpr = dict()
-tpr = dict()
-roc_auc = dict()
-for i in range(2):
-    fpr[i], tpr[i], _ = metrics.roc_curve(y_true_auc, y_pred_auc)
-    roc_auc[i] = metrics.auc(fpr[i], tpr[i])
-
-# Compute micro-average ROC curve and ROC area
-fpr["micro"], tpr["micro"], _ = metrics.roc_curve(y_true_auc, y_pred_auc)
-roc_auc["micro"] = metrics.auc(fpr["micro"], tpr["micro"])
+# --- ROC Plot ---
+fpr, tpr, thresholds = metrics.roc_curve(y_true, y_pred_probs)
+roc_auc = metrics.auc(fpr, tpr)
 
 plt.figure()
 lw = 2
-print('ROC : {:.3f}'.format(roc_auc[1]))
-plt.plot(fpr[1], tpr[1], color='darkred', lw=lw, label='ROC curve ({:.3f})'.format(roc_auc[1]))
+print('ROC AUC: {:.3f}'.format(roc_auc))
+plt.plot(fpr, tpr, color='darkred', lw=lw, label='ROC curve ({:.3f})'.format(roc_auc))
 plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
 plt.xlim([0.0, 1.0])
 plt.ylim([0.0, 1.05])
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive Rate')
-plt.title('XceptionNet')
+plt.title(f'XceptionNet (Soft Voting)')
 plt.legend(loc="lower right")
-plt.show()
+
+save_path = os.path.join(project_root, 'roc_curve_soft_xception.png')
+plt.savefig(save_path)
+print(f"ROC curve saved to {save_path}")

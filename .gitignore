@@ -1,3 +1,7 @@
 
 Unimodal/Training/__pycache__/__init__.cpython-38.pyc
 *.xml
+
+dataset/
+__pycache__/
+*.pt
